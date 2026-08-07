@@ -39,14 +39,16 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
+    # PII and secret patterns to detect and redact
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "phone": r"0\d{9,10}",
+        "email": r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}",
+        "national_id": r"\b\d{12}\b|\b\d{9}\b",
+        "api_key": r"sk-[a-zA-Z0-9][a-zA-Z0-9_-]{10,}",
+        "password": r"(?i)password\s*[:=]\s*\S+",
+        "db_host": r"\b[\w-]+\.internal(?::\d+)?(?:/[\w/-]*)?",
+        "credit_card": r"\b(?:\d{4}[\s-]?){3}\d{4}\b",
+        "vinbank_secret": r"vinbank[\w-]*secret[\w-]*",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -89,15 +91,12 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-2.0-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
+# TODO 5: Create safety_judge_agent using LlmAgent
+safety_judge_agent = llm_agent.LlmAgent(
+    model="gemini-2.0-flash",
+    name="safety_judge",
+    instruction=SAFETY_JUDGE_INSTRUCTION,
+)
 judge_runner = None
 
 
@@ -172,16 +171,35 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Content filter: detect and redact PII / secrets
+        filter_result = content_filter(response_text)
+        if filter_result["issues"]:
+            self.redacted_count += 1
+            # Replace the content with the redacted version
+            if llm_response.content:
+                llm_response.content = type(llm_response.content)(
+                    role="model",
+                    parts=[types.Part.from_text(text=filter_result["redacted"])],
+                )
+            response_text = filter_result["redacted"]
 
-        return llm_response  # TODO: modify if needed
+        # 2. LLM-as-Judge: deep safety check
+        if self.use_llm_judge:
+            judge_result = await llm_safety_check(response_text)
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+                if llm_response.content:
+                    llm_response.content = type(llm_response.content)(
+                        role="model",
+                        parts=[types.Part.from_text(
+                            text="I cannot share internal system details or provide "
+                                 "responses that violate VinBank's security policy. "
+                                 "Please contact our support team for assistance."
+                        )],
+                    )
+
+        # 3. Return the (possibly modified) response
+        return llm_response
 
 
 # ============================================================

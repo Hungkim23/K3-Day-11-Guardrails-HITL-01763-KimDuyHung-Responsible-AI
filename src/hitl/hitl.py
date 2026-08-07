@@ -65,32 +65,41 @@ class ConfidenceRouter:
         Returns:
             RoutingDecision with routing action and metadata
         """
-        # TODO 11: Implement routing logic
-        #
-        # 1. Check if action_type is in HIGH_RISK_ACTIONS
-        #    -> If yes: always escalate (action="escalate", priority="high",
-        #       requires_human=True, reason="High-risk action: {action_type}")
-        #
-        # 2. Check confidence thresholds:
-        #    - confidence >= 0.9:
-        #      action="auto_send", priority="low",
-        #      requires_human=False, reason="High confidence"
-        #
-        #    - 0.7 <= confidence < 0.9:
-        #      action="queue_review", priority="normal",
-        #      requires_human=True, reason="Medium confidence — needs review"
-        #
-        #    - confidence < 0.7:
-        #      action="escalate", priority="high",
-        #      requires_human=True, reason="Low confidence — escalating"
+        # 1. High-risk actions always escalate regardless of confidence
+        if action_type in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason=f"High-risk action: {action_type} — mandatory human review",
+                priority="high",
+                requires_human=True,
+            )
 
-        return RoutingDecision(
-            action="auto_send",
-            confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+        # 2. Route by confidence threshold
+        if confidence >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=confidence,
+                reason="High confidence — safe to auto-send",
+                priority="low",
+                requires_human=False,
+            )
+        elif confidence >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=confidence,
+                reason="Medium confidence — needs human review before sending",
+                priority="normal",
+                requires_human=True,
+            )
+        else:
+            return RoutingDecision(
+                action="escalate",
+                confidence=confidence,
+                reason="Low confidence — escalating to human immediately",
+                priority="high",
+                requires_human=True,
+            )
 
 
 # ============================================================
@@ -111,33 +120,77 @@ class ConfidenceRouter:
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Large Money Transfer Approval",
+        "trigger": "User requests a transfer of >= 50,000,000 VND (50 million) or any "
+                   "international wire transfer, OR the action_type is 'transfer_money' "
+                   "with an amount exceeding the configured threshold.",
+        "hitl_model": "human-in-the-loop",
+        "context_needed": "Reviewer sees: (1) sender account & balance, (2) recipient name "
+                          "& account number, (3) transfer amount & currency, "
+                          "(4) agent-proposed reason/memo, (5) diff vs. last 3 transfers "
+                          "for anomaly detection, (6) proposed API payload before sending.",
+        "example": "Customer asks: 'Transfer 200 million VND to account 0123456789 at ABC Bank.' "
+                   "Agent prepares the request. Before executing, a bank officer reviews "
+                   "the beneficiary, amount, and any mismatch with historical patterns.",
+        "approval_path": "Approve → agent executes transfer and records 'APPROVED' decision. "
+                         "Reject → agent informs customer the request was declined and logs reason. "
+                         "Timeout (120 s) → agent rejects automatically (fail closed) and "
+                         "notifies customer to call the branch.",
+        "audit_fields": "correlation_id (UUID), user_id, intent='large_transfer', "
+                        "proposed_action=<transfer payload diff>, reviewer_id, "
+                        "reviewer_decision (approve|reject|timeout), decision_timestamp, "
+                        "latency_ms, alert_flags (e.g. new_beneficiary, amount_spike).",
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Personal Information Update",
+        "trigger": "Agent proposes to change KYC fields: legal name, date of birth, "
+                   "phone number, address, or identity document number. "
+                   "action_type must be 'update_personal_info'.",
+        "hitl_model": "human-in-the-loop",
+        "context_needed": "Reviewer sees: (1) current record (before), (2) proposed record (after), "
+                          "(3) side-by-side diff of changed fields, (4) supporting document "
+                          "(image/ID scan if provided), (5) last update timestamp and channel.",
+        "example": "Customer submits a new CCCD photo to update their ID number from "
+                   "001234567890 to 001234567999. Agent extracts the new number and presents "
+                   "a diff. A compliance officer verifies the document matches the new number "
+                   "before the update is committed.",
+        "approval_path": "Approve → system updates KYC record and sends SMS confirmation. "
+                         "Reject → no change; agent informs customer to visit a branch. "
+                         "Timeout (300 s) → request is queued for next available officer; "
+                         "customer is informed via email.",
+        "audit_fields": "correlation_id (UUID), user_id, intent='kyc_update', "
+                        "field_diff={'phone': ('old', 'new'), ...}, document_ref, "
+                        "reviewer_id, reviewer_decision, decision_timestamp, "
+                        "channel (web|mobile|chatbot).",
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Account Closure Request",
+        "trigger": "User explicitly requests to close an account "
+                   "(action_type='close_account') or the agent detects intent "
+                   "such as 'cancel my account', 'delete account', 'đóng tài khoản'. "
+                   "Always escalates regardless of confidence score.",
+        "hitl_model": "human-as-tiebreaker",
+        "context_needed": "Reviewer sees: (1) account number & type (savings/checking/loan), "
+                          "(2) current balance and any active loans or auto-payments linked, "
+                          "(3) closure reason provided by customer, "
+                          "(4) regulatory hold check (AML/KYC flags), "
+                          "(5) agent recommendation (can close / cannot close with reason).",
+        "example": "Customer says: 'I want to close my savings account ending in 4521.' "
+                   "The account has a balance of 5,000,000 VND and an active auto-payment. "
+                   "The agent flags the auto-payment conflict and presents a summary. "
+                   "A customer-service manager decides whether to proceed after verifying "
+                   "the customer's identity via OTP.",
+        "approval_path": "Approve → agent initiates closure workflow, disburses remaining "
+                         "balance to linked account, sends closure confirmation email. "
+                         "Reject → agent explains why closure was denied (e.g. active loan). "
+                         "Timeout (600 s) → request is parked; customer contacted within 24 h "
+                         "by the branch (fail safe — no irreversible action taken).",
+        "audit_fields": "correlation_id (UUID), user_id, account_id, intent='account_closure', "
+                        "balance_at_request, active_products_count, aml_flag (bool), "
+                        "reviewer_id, reviewer_decision, decision_timestamp, "
+                        "otp_verified (bool), closure_channel.",
     },
 ]
 

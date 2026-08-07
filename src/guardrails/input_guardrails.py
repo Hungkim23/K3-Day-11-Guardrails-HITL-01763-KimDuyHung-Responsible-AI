@@ -5,6 +5,7 @@ Lab 11 — Part 2A: Input Guardrails
   TODO 3: Input Guardrail Plugin (ADK)
 """
 import re
+import unicodedata
 
 from google.genai import types
 from google.adk.plugins import base_plugin
@@ -35,20 +36,61 @@ from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
 def detect_injection(user_input: str) -> bool:
     """Detect prompt injection patterns in user input.
 
+    Canonicalizes Unicode/invisible spacing before detection.
+    Handles both direct injection and instruction embedded in
+    untrusted email/RAG documents (e.g. zero-width chars).
+
     Args:
         user_input: The user's message
 
     Returns:
         True if injection detected, False otherwise
     """
+    # Step 1: Normalize Unicode forms (NFKC collapses lookalike chars)
+    normalized_text = unicodedata.normalize('NFKC', user_input)
+    # Step 2: Strip invisible/zero-width characters that attackers embed
+    clean_input = re.sub(r'[\u200b-\u200d\u200f\u00ad\ufeff\u2060-\u2064]', '', normalized_text)
+    # Step 3: Collapse extra whitespace so "i g n o r e" → "ignore"
+    clean_input = re.sub(r'\s+', ' ', clean_input).strip()
+
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        # --- Direct injection (English) ---
+        r"ignore\s+(all\s+)?(previous|above|prior|earlier)\s+(instructions?|rules?|directives?|commands?)",
+        r"disregard\s+(all\s+)?(previous|above|prior)\s+(instructions?|rules?)",
+        r"forget\s+(all\s+)?(previous|your)\s+(instructions?|rules?|training)",
+        r"you\s+are\s+now\s+(a\s+|an\s+)?(unrestricted|DAN|jailbroken|free\s+AI|admin|root)",
+        r"pretend\s+(you\s+are|to\s+be|that\s+you\s+are)",
+        r"act\s+as\s+(a\s+|an\s+)?(unrestricted|uncensored|evil|DAN|developer\s+mode)",
+        r"(reveal|show|display|print|output|repeat|give\s+me|tell\s+me)\s+(your\s+)?(system\s+prompt|system\s+instruction|initial\s+prompt|instructions?|rules?|secret|password|api\s+key|config)",
+        r"translate\s+(your\s+)?(instructions?|system\s+prompt|rules?)\s+(to|into)",
+        r"(output|print|repeat|echo)\s+.{0,20}(system\s+prompt|instructions?|rules?|config)",
+        r"(jailbreak|bypass\s+(security|safety|filter|guardrail)|override\s+(safety|rules?|filter|policy))",
+        r"developer\s+mode\s+(enabled|on|activated)",
+        r"do\s+anything\s+now\s*(DAN)?",
+        r"enable\s+(debug|developer|admin|god)\s+mode",
+        r"new\s+(persona|character|role|identity)\s*[:=]",
+        r"(your\s+)?new\s+instructions?\s*(are|follow|:)",
+        r"STOP\s+BEING\s+(an?\s+)?(assistant|AI|bot)",
+        r"from\s+now\s+on\s+(you\s+are|act\s+as|pretend)",
+        r"\[system\]|\[INST\]|\[SYS\]|<\|system\|>|<\|im_start\|>",
+        # --- Direct injection (Vietnamese) ---
+        r"bỏ\s*qua\s+(tất\s*cả\s+)?(hướng\s+dẫn|câu\s+lệnh|quy\s+tắc|lệnh)",
+        r"quên\s+(tất\s*cả\s+)?(hướng\s+dẫn|quy\s+tắc|lệnh|hướng\s+dẫn\s+trước)",
+        r"(giả\s+lập|đóng\s+vai|giả\s+vờ)\s*(là|thành|như)?",
+        r"(hiển\s+thị|tiết\s+lộ|cho\s+xem|in\s+ra)\s+(system\s+prompt|hướng\s+dẫn\s+hệ\s+thống|mật\s+khẩu|khóa\s+API)",
+        r"(bạn\s+là|từ\s+bây\s+giờ\s+bạn\s+là)\s+(AI|chatbot|trợ\s+lý)\s+(không\s+giới\s+hạn|tự\s+do)",
+        r"chế\s+độ\s+(phát\s+triển|quản\s+trị|debug|admin)",
+        # --- Indirect injection (email/RAG context) ---
+        r"(email|message|document|content|text)\s+(says?|contains?|instructs?|tells?\s+you)\s+(to\s+)?(ignore|forget|disregard|reveal)",
+        r"(as\s+per|according\s+to)\s+(the\s+)?(email|document|instruction)\s*[,:]\s*(ignore|reveal|show)",
+        r"(from|in)\s+(this|the)\s+(email|document|context)\s*[,:]\s*(please\s+)?(ignore|forget|reveal|show)",
+        # --- Obfuscated / encoding patterns ---
+        r"(base64|rot13|caesar|hex\s+decode)\s*(this|decode|the)",
+        r"(i\s+g\s+n\s+o\s+r\s+e|I\s*G\s*N\s*O\s*R\s*E)",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, clean_input, re.IGNORECASE):
             return True
     return False
 
@@ -66,20 +108,43 @@ def detect_injection(user_input: str) -> bool:
 def topic_filter(user_input: str) -> bool:
     """Check if input is off-topic or contains blocked topics.
 
+    Allows banking-related queries and external content summarization
+    (e.g. "summarize this bank-transfer email"). Blocks off-topic and
+    explicitly dangerous subjects.
+
     Args:
         user_input: The user's message
 
     Returns:
         True if input should be BLOCKED (off-topic or blocked topic)
     """
-    input_lower = user_input.lower()
+    # Normalize input for comparison
+    normalized = unicodedata.normalize('NFKC', user_input)
+    input_lower = re.sub(r'[\u200b-\u200d\ufeff]', '', normalized).lower()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    # 1. Block explicitly dangerous / irrelevant topics immediately
+    for blocked in BLOCKED_TOPICS:
+        if blocked.lower() in input_lower:
+            return True
 
-    pass  # Replace with your implementation
+    # 2. Allow if any banking-related topic keyword is present
+    for allowed in ALLOWED_TOPICS:
+        if allowed.lower() in input_lower:
+            return False
+
+    # Additional banking-related Vietnamese keywords not in config
+    EXTRA_BANKING_VI = [
+        "vinbank", "ngân hàng", "chuyển khoản", "rút tiền", "nạp tiền",
+        "thẻ", "phí", "hạn mức", "tài khoản", "số dư", "giao dịch",
+        "vay vốn", "lãi", "kỳ hạn", "tiết kiệm", "thanh toán",
+        "internet banking", "mobile banking", "otpban",
+    ]
+    for kw in EXTRA_BANKING_VI:
+        if kw in input_lower:
+            return False
+
+    # 3. If no banking keyword matched → off-topic → block
+    return True
 
 
 # ============================================================
@@ -132,14 +197,25 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        # 1. Injection detection
+        if detect_injection(text):
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process that request. "
+                "I only help with VinBank banking questions such as account inquiries, "
+                "transfers, loan rates, and card services."
+            )
 
-        pass  # Replace with your implementation
+        # 2. Topic filter
+        if topic_filter(text):
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm a VinBank assistant and can only help with banking-related questions. "
+                "Please ask about accounts, transfers, loans, interest rates, or card services."
+            )
+
+        # 3. Safe — let message through
+        return None
 
 
 # ============================================================
